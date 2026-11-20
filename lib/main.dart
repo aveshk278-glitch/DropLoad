@@ -86,7 +86,7 @@ class _DownloadPageState extends State<DownloadPage> {
 
   Future<void> startQueue() async {
     if (busy) return;
-    final urls = controller.text.split(RegExp(r'\\s+')).where((e) => e.trim().isNotEmpty).toList();
+    final urls = controller.text.split(RegExp(r'\s+')).where((e) => e.trim().isNotEmpty).toList();
     if (urls.isEmpty) {
       setState(() => status = 'Paste one or more direct file links');
       return;
