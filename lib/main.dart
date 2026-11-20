@@ -4,6 +4,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
+import 'package:youtube_explode_dart/youtube_explode_dart.dart';
+
+import 'video_service.dart';
 
 void main() => runApp(const DropLoadApp());
 
@@ -30,6 +33,7 @@ class DownloadPage extends StatefulWidget {
 class _DownloadPageState extends State<DownloadPage> {
   final controller = TextEditingController();
   final downloads = <String>[];
+  final videoService = VideoService();
   String status = 'Ready';
   double? progress;
   bool busy = false;
@@ -88,9 +92,12 @@ class _DownloadPageState extends State<DownloadPage> {
     if (busy) return;
     final urls = controller.text.split(RegExp(r'\s+')).where((e) => e.trim().isNotEmpty).toList();
     if (urls.isEmpty) {
-      setState(() => status = 'Paste one or more direct file links');
+      setState(() => status = 'Paste one or more direct file links or a YouTube link');
       return;
     }
+    // A previous Cancel left this true and blocked every later Download
+    // tap, because the loop below breaks immediately when it is set.
+    cancelled = false;
     queueTotal = urls.length;
     queueCompleted = 0;
     pendingUrls.clear();
@@ -99,7 +106,15 @@ class _DownloadPageState extends State<DownloadPage> {
       if (cancelled) break;
       final next = pendingUrls.removeAt(0);
       controller.text = next;
-      await startDownload();
+      if (videoService.isYouTubeUrl(next)) {
+        await startYouTubeDownload(next);
+      } else if (videoService.isUnsupportedVideoSite(next)) {
+        if (mounted) {
+          setState(() => status = 'Video downloads from this site are not supported yet — only YouTube and direct file links work for now.');
+        }
+      } else {
+        await startDownload();
+      }
       queueCompleted++;
       if (cancelled) break;
     }
@@ -112,12 +127,14 @@ class _DownloadPageState extends State<DownloadPage> {
     cancelled = true;
     pendingUrls.clear();
     activeClient?.close();
+    videoService.cancelCurrent();
     setState(() => status = 'Cancelling...');
   }
 
 
   @override
   void dispose() {
+    videoService.dispose();
     controller.dispose();
     super.dispose();
   }
@@ -182,6 +199,143 @@ class _DownloadPageState extends State<DownloadPage> {
     }
   }
 
+  /// YouTube flow: fetch the real format list, let the user pick one,
+  /// then download exactly that stream. Nothing is shown that YouTube
+  /// did not return for this video.
+  Future<void> startYouTubeDownload(String url) async {
+    if (queueTotal == 0 || queueCompleted == queueTotal) cancelled = false;
+    setState(() { busy = true; status = 'Reading YouTube formats...'; progress = null; });
+    try {
+      final ytVideo = await videoService.fetchVideo(url);
+      if (cancelled) return;
+      if (!mounted) return;
+      final chosen = await pickYouTubeFormat(ytVideo);
+      if (chosen == null || cancelled) return;
+      if (!mounted) return;
+      setState(() { status = 'Downloading...'; progress = 0; });
+      final directory = Directory('${(await getApplicationDocumentsDirectory()).path}/DropLoad');
+      await directory.create(recursive: true);
+      final file = await videoService.downloadStream(
+        video: ytVideo,
+        stream: chosen,
+        directory: directory,
+        onProgress: (received, total) {
+          if (mounted) {
+            setState(() {
+              status = 'Downloading...';
+              progress = total <= 0 ? null : received / total;
+            });
+          }
+        },
+        isCancelled: () => cancelled,
+      );
+      if (mounted) setState(() { status = 'Download complete'; progress = 1; downloads.insert(0, file.path); });
+      await saveHistory();
+    } catch (error) {
+      if (mounted) {
+        setState(() => status = cancelled
+            ? 'Download cancelled'
+            : 'Failed: ${videoService.friendlyError(error)}');
+      }
+    } finally {
+      videoService.closeCurrent();
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  /// Shows every format YouTube returned for the video, grouped by what
+  /// the file actually contains. Returns the picked stream, or null when
+  /// the user dismisses the dialog.
+  Future<StreamInfo?> pickYouTubeFormat(YouTubeVideo ytVideo) {
+    final muxed = ytVideo.muxed;
+    final videoOnly = ytVideo.videoOnly;
+    final audioOnly = ytVideo.audioOnly;
+    return showDialog<StreamInfo>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(
+          ytVideo.video.title,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+        ),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('${ytVideo.video.author} • ${_formatDuration(ytVideo.video.duration)}'),
+                const SizedBox(height: 16),
+                if (muxed.isNotEmpty) ...[
+                  const Text('Video + audio (ready to watch)',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  for (final stream in muxed)
+                    _youTubeFormatTile(dialogContext, stream, 'video + audio'),
+                  const SizedBox(height: 12),
+                ],
+                if (videoOnly.isNotEmpty) ...[
+                  const Text('Video only (no audio)',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  for (final stream in videoOnly)
+                    _youTubeFormatTile(dialogContext, stream, 'no audio'),
+                  const SizedBox(height: 12),
+                ],
+                if (audioOnly.isNotEmpty) ...[
+                  const Text('Audio only',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  for (final stream in audioOnly)
+                    _youTubeFormatTile(dialogContext, stream, 'audio only'),
+                  const SizedBox(height: 12),
+                ],
+                const Text(
+                  'Only the formats YouTube returned for this video are listed. '
+                  'Video + audio goes up to 360p; higher qualities are video-only '
+                  'until FFmpeg merging is added.',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  ListTile _youTubeFormatTile(
+      BuildContext dialogContext, StreamInfo stream, String tag) {
+    final fps = stream is VideoStreamInfo &&
+            stream.framerate.framesPerSecond > 30
+        ? ' ${stream.framerate.framesPerSecond}fps'
+        : '';
+    final title = stream is AudioOnlyStreamInfo
+        ? '${stream.bitrate} · ${stream.container.name}'
+        : '${stream.qualityLabel}$fps · ${stream.container.name}';
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      title: Text(title),
+      subtitle: Text('${stream.size} · ${stream.bitrate} · $tag'),
+      onTap: () => Navigator.of(dialogContext).pop(stream),
+    );
+  }
+
+  String _formatDuration(Duration? duration) {
+    if (duration == null) return '';
+    final hours = duration.inHours;
+    final minutes = duration.inMinutes % 60;
+    final seconds = duration.inSeconds % 60;
+    final two = (int value) => value.toString().padLeft(2, '0');
+    if (hours > 0) return '$hours:${two(minutes)}:${two(seconds)}';
+    return '${two(minutes)}:${two(seconds)}';
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('◈ DropLoad'), backgroundColor: Colors.transparent),
@@ -205,11 +359,11 @@ class _DownloadPageState extends State<DownloadPage> {
             boxShadow: const [BoxShadow(color: Color(0x442D208E), blurRadius: 30)],
           ),
           child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            const Text('Paste a direct file URL', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const Text('Paste a link', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 14),
             TextField(controller: controller, enabled: !busy, minLines: 1, maxLines: 5,
               decoration: InputDecoration(border: const OutlineInputBorder(),
-                hintText: 'Paste direct file URLs, one per line',
+                hintText: 'Paste direct file URLs or a YouTube video link, one per line',
                 suffixIcon: IconButton(onPressed: busy ? null : pasteLink,
                   tooltip: 'Paste from clipboard', icon: const Icon(Icons.paste)))),
             const SizedBox(height: 16),
@@ -226,7 +380,7 @@ class _DownloadPageState extends State<DownloadPage> {
           ]),
         ),
         const SizedBox(height: 24),
-        const Text('Supports multiple direct HTTP/HTTPS file URLs, processed sequentially. Website video extraction, format conversion and quality selection are not yet supported.'),
+        const Text('Direct HTTP/HTTPS file URLs are downloaded as-is, several in a row. A YouTube video link shows the formats YouTube really offers for that video — pick a quality to download. Video + audio goes up to 360p; higher qualities are video-only (no sound) until FFmpeg merging is added. Other video sites are not supported yet.'),
         const SizedBox(height: 24),
         const Text('Saved downloads', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
         for (final path in downloads) ListTile(
