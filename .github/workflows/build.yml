@@ -1,0 +1,51 @@
+name: Build DropLoad
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter create --project-name dropload --platforms=android .
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DropLoad-Android-APK
+          path: build/app/outputs/flutter-apk/*.apk
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+          - os: macos-latest
+            platform: macos
+          - os: ubuntu-latest
+            platform: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter config --enable-${{ matrix.platform }}-desktop
+      - run: flutter create --project-name dropload --platforms=${{ matrix.platform }} .
+      - run: flutter pub get
+      - run: flutter build ${{ matrix.platform }} --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DropLoad-${{ matrix.platform }}
+          path: |
+            build/windows/x64/runner/Release/**
+            build/macos/Build/Products/Release/*.app/**
+            build/linux/x64/release/bundle/**
