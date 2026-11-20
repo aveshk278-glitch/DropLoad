@@ -13,6 +13,18 @@ jobs:
           channel: stable
       - run: flutter create --project-name dropload --platforms=android .
       - run: flutter pub get
+      - name: Remove generated sample test (references default MyApp)
+        run: rm -rf test
+      - name: Enable Android internet permission
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('android/app/src/main/AndroidManifest.xml')
+          text = p.read_text()
+          if 'android.permission.INTERNET' not in text:
+              text = text.replace('<manifest', '<manifest', 1).replace('>', '>\n    <uses-permission android:name="android.permission.INTERNET" />', 1)
+              p.write_text(text)
+          PY
       - run: flutter analyze
       - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
