@@ -233,7 +233,7 @@ class _DownloadPageState extends State<DownloadPage> {
           leading: const Icon(Icons.check_circle_outline),
           title: Text(path.split(Platform.pathSeparator).last),
           subtitle: SelectableText(path),
-          trailing: Wrap(mainAxisSize: MainAxisSize.min, children: [
+          trailing: Wrap(children: [
             IconButton(tooltip: 'Copy path', icon: const Icon(Icons.copy), onPressed: () => copyPath(path)),
             IconButton(tooltip: 'Remove from history', icon: const Icon(Icons.delete_outline), onPressed: () => removeHistoryItem(path)),
           ]),
