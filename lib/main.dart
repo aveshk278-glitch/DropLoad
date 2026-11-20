@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:convert';
+import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
@@ -33,6 +34,9 @@ class _DownloadPageState extends State<DownloadPage> {
   double? progress;
   bool busy = false;
   bool cancelled = false;
+  final pendingUrls = <String>[];
+  int queueCompleted = 0;
+  int queueTotal = 0;
   http.Client? activeClient;
   File? activeFile;
 
@@ -65,9 +69,48 @@ class _DownloadPageState extends State<DownloadPage> {
     await file.writeAsString(jsonEncode(downloads));
   }
 
+  Future<void> pasteLink() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (data?.text != null && mounted) setState(() => controller.text = data!.text!);
+  }
+
+  Future<void> copyPath(String path) async {
+    await Clipboard.setData(ClipboardData(text: path));
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('File path copied')));
+  }
+
+  Future<void> removeHistoryItem(String path) async {
+    setState(() => downloads.remove(path));
+    await saveHistory();
+  }
+
+  Future<void> startQueue() async {
+    if (busy) return;
+    final urls = controller.text.split(RegExp(r'\\s+')).where((e) => e.trim().isNotEmpty).toList();
+    if (urls.isEmpty) {
+      setState(() => status = 'Paste one or more direct file links');
+      return;
+    }
+    queueTotal = urls.length;
+    queueCompleted = 0;
+    pendingUrls.clear();
+    pendingUrls.addAll(urls);
+    while (pendingUrls.isNotEmpty) {
+      if (cancelled) break;
+      final next = pendingUrls.removeAt(0);
+      controller.text = next;
+      await startDownload();
+      queueCompleted++;
+      if (cancelled) break;
+    }
+    pendingUrls.clear();
+    if (mounted && !cancelled) setState(() => status = 'Queue processed: $queueCompleted of $queueTotal');
+  }
+
   void cancelDownload() {
     if (!busy) return;
     cancelled = true;
+    pendingUrls.clear();
     activeClient?.close();
     setState(() => status = 'Cancelling...');
   }
@@ -85,7 +128,7 @@ class _DownloadPageState extends State<DownloadPage> {
       setState(() => status = 'Enter a valid direct HTTP/HTTPS file link');
       return;
     }
-    cancelled = false;
+    if (queueTotal == 0 || queueCompleted == queueTotal) cancelled = false;
     setState(() { busy = true; status = 'Connecting...'; progress = null; });
     final client = http.Client();
     activeClient = client;
@@ -164,11 +207,13 @@ class _DownloadPageState extends State<DownloadPage> {
           child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
             const Text('Paste a direct file URL', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 14),
-            TextField(controller: controller, enabled: !busy,
-              decoration: const InputDecoration(border: OutlineInputBorder(),
-                hintText: 'https://example.com/video.mp4')),
+            TextField(controller: controller, enabled: !busy, minLines: 1, maxLines: 5,
+              decoration: InputDecoration(border: const OutlineInputBorder(),
+                hintText: 'Paste direct file URLs, one per line',
+                suffixIcon: IconButton(onPressed: busy ? null : pasteLink,
+                  tooltip: 'Paste from clipboard', icon: const Icon(Icons.paste)))),
             const SizedBox(height: 16),
-            FilledButton.icon(onPressed: busy ? null : startDownload,
+            FilledButton.icon(onPressed: busy ? null : startQueue,
               icon: const Icon(Icons.download_rounded), label: const Text('Download')),
             if (busy) TextButton.icon(onPressed: cancelDownload,
               icon: const Icon(Icons.cancel_outlined), label: const Text('Cancel download')),
@@ -181,13 +226,17 @@ class _DownloadPageState extends State<DownloadPage> {
           ]),
         ),
         const SizedBox(height: 24),
-        const Text('This version supports direct downloadable HTTP/HTTPS files only. Website video extraction, playlists, format conversion and quality selection are planned features.'),
+        const Text('Supports multiple direct HTTP/HTTPS file URLs, processed sequentially. Website video extraction, format conversion and quality selection are not yet supported.'),
         const SizedBox(height: 24),
         const Text('Saved downloads', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
         for (final path in downloads) ListTile(
           leading: const Icon(Icons.check_circle_outline),
           title: Text(path.split(Platform.pathSeparator).last),
           subtitle: SelectableText(path),
+          trailing: Wrap(mainAxisSize: MainAxisSize.min, children: [
+            IconButton(tooltip: 'Copy path', icon: const Icon(Icons.copy), onPressed: () => copyPath(path)),
+            IconButton(tooltip: 'Remove from history', icon: const Icon(Icons.delete_outline), onPressed: () => removeHistoryItem(path)),
+          ]),
         ),
       ]),
     )),
